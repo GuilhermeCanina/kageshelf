@@ -4,7 +4,7 @@
 
 **A local-first desktop organizer for anime libraries prepared for Jellyfin.**
 
-> **Release status:** `1.0.0-rc.2` — the rebrand candidate must pass clean CI and packaged-app smoke tests before the stable `1.0.0` release.
+> **Release status:** `1.0.0` — stable release. Downloadable packages are published through GitHub Releases.
 
 KageShelf helps you turn a folder of downloaded episodes into a reviewable, Jellyfin-friendly library structure. It is built with Electron, React, and TypeScript for Windows and Linux. Media files stay on your computer: the app scans locally and only contacts AniList when you search for anime metadata.
 

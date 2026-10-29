@@ -64,7 +64,7 @@ function createWindow(): void {
     height: 980,
     minWidth: 1120,
     minHeight: 720,
-    title: 'KageShelf 1.0.0-rc.2',
+    title: 'KageShelf 1.0.0',
     backgroundColor: '#0b0e14',
     show: false,
     webPreferences: {
