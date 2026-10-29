@@ -13,9 +13,9 @@
     "test": "vitest run --testTimeout=15000",
     "test:watch": "vitest",
     "validate": "npm run typecheck && npm test && npm run build",
-    "package:linux": "npm run validate && electron-builder --linux AppImage --x64",
-    "package:windows": "npm run validate && electron-builder --win nsis portable --x64",
-    "package:windows:nsis": "npm run validate && electron-builder --win nsis --x64"
+    "package:linux": "npm run validate && electron-builder --linux AppImage --x64 --publish never",
+    "package:windows": "npm run validate && electron-builder --win nsis portable --x64 --publish never",
+    "package:windows:nsis": "npm run validate && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "lucide-react": "1.64.0",
