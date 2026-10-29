@@ -52,7 +52,7 @@ function EmptyState({ onPick }: { onPick: () => void }) {
     <div className="empty-state">
       <div className="empty-illustration"><FolderOpen size={31} strokeWidth={1.7} aria-hidden="true" /><i><Plus size={14} strokeWidth={2} aria-hidden="true" /></i></div>
       <h2>Vamos organizar seus animes?</h2>
-      <p>Escolha a pasta da série. O candidato 1.0.0 reúne identificação, metadados, plano e cópia verificada; a origem permanece intacta.</p>
+      <p>Escolha a pasta da série. A versão 1.0.0 reúne identificação, metadados, plano e cópia verificada; a origem permanece intacta.</p>
       <button className="button button-primary" onClick={onPick}>Escolher pasta de origem</button>
     </div>
   )
@@ -649,7 +649,7 @@ A origem será preservada. Continuar?`)) return
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className="online-dot" /> Candidato de lançamento local
+          <span className="online-dot" /> Versão estável 1.0.0
         </div>
       </aside>
 
