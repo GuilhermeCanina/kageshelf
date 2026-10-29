@@ -1,0 +1,26 @@
+# Dependencies and generated output
+node_modules/
+out/
+dist/
+dist-electron/
+release/
+coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs and operating-system files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local editor state
+.vscode/
+.idea/

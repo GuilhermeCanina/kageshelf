@@ -1,0 +1,120 @@
+{
+  "name": "kageshelf",
+  "version": "1.0.0-rc.2",
+  "private": true,
+  "description": "Cross-platform desktop organizer for local anime libraries prepared for Jellyfin.",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run --testTimeout=15000",
+    "test:watch": "vitest",
+    "validate": "npm run typecheck && npm test && npm run build",
+    "package:linux": "npm run validate && electron-builder --linux AppImage --x64",
+    "package:windows": "npm run validate && electron-builder --win nsis portable --x64",
+    "package:windows:nsis": "npm run validate && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "lucide-react": "1.64.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^45.1.0",
+    "electron-builder": "26.18.0",
+    "electron-vite": "^6.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12",
+    "vitest": "^4.1.12"
+  },
+  "build": {
+    "appId": "com.jellyfinanimesupremo.app",
+    "productName": "KageShelf",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "!**/*.map",
+      "!tests/**",
+      "!*.md",
+      "!.github/**"
+    ],
+    "asar": true,
+    "artifactName": "KageShelf-${version}-${arch}.${ext}",
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "KageShelf",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "artifactName": "KageShelf-${version}-Setup-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "KageShelf-${version}-Portable-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "build/icons",
+      "category": "AudioVideo",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "KageShelf-${version}-${arch}.${ext}",
+      "desktop": {
+        "entry": {
+          "Name": "KageShelf",
+          "Comment": "Cross-platform anime library organizer for Jellyfin",
+          "Categories": "AudioVideo;Video;",
+          "Terminal": "false"
+        }
+      },
+      "syncDesktopName": true
+    },
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "THIRD-PARTY-NOTICES.md",
+        "to": "THIRD-PARTY-NOTICES.md"
+      }
+    ]
+  },
+  "author": "GuilhermeCanina",
+  "desktopName": "com.jellyfinanimesupremo.app"
+}
