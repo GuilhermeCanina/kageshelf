@@ -301,6 +301,288 @@ describe('verified organization execution', () => {
     expect((await listOrganizationExecutionHistory(userData))[0].completedFiles).toBe(1)
   })
 
+  it('completes resume when reconciliation recovers the final pending publication', async () => {
+    const root = await tempRoot()
+    const source = path.join(root, 'Anime')
+    const destination = path.join(root, 'Anime [Jellyfin]')
+    const userData = path.join(root, 'user-data')
+    await mkdir(source)
+    await mkdir(path.join(destination, 'Season 01'), { recursive: true })
+
+    const sourceName = 'Anime - 01 [1080p].mkv'
+    const content = 'recovered-final-publication-content'
+    await writeFile(path.join(source, sourceName), content)
+    const sourceInfo = await stat(path.join(source, sourceName))
+    const runId = randomUUID()
+    const relativeDestination = 'Season 01/Anime S01E01.mkv'
+    const tempRelativePath = `Season 01/.Anime S01E01.mkv.${runId}.0.partial`
+    const target = path.join(destination, relativeDestination)
+    const temp = path.join(destination, tempRelativePath)
+
+    await writeFile(temp, content, { mode: 0o644 })
+    const tempInfo = await stat(temp)
+    await link(temp, target)
+
+    const digest = createHash('sha256').update(content).digest('hex')
+    const item = {
+      sourceRelativePath: sourceName,
+      destinationRelativePath: relativeDestination,
+      sizeBytes: Buffer.byteLength(content),
+      modifiedAtMs: Math.trunc(sourceInfo.mtimeMs),
+      kind: 'video' as const
+    }
+    const journal: ExecutionJournal = {
+      schemaVersion: 2,
+      pendingRollback: null,
+      runId,
+      planId: 'plan-final-recovery',
+      createdAt: new Date().toISOString(),
+      finishedAt: null,
+      status: 'interrupted',
+      sourcePath: source,
+      destinationPath: destination,
+      items: [item],
+      pendingPublication: {
+        sourceRelativePath: sourceName,
+        destinationRelativePath: relativeDestination,
+        tempRelativePath,
+        sizeBytes: item.sizeBytes,
+        sha256: digest,
+        tempDevice: tempInfo.dev,
+        tempInode: tempInfo.ino,
+        modifiedAtMs: item.modifiedAtMs,
+        kind: 'video',
+        itemIndex: 0,
+        method: 'hard-link'
+      },
+      files: [],
+      errors: [],
+      attempts: 1
+    }
+
+    const journalDirectory = path.join(userData, 'organization-executions')
+    await mkdir(journalDirectory, { recursive: true })
+    await writeFile(path.join(journalDirectory, `${runId}.json`), JSON.stringify(journal, null, 2))
+
+    const stages: string[] = []
+    const resumed = await resumeOrganizationExecution(userData, runId, (event) => stages.push(event.stage), () => false)
+
+    expect(resumed.status).toBe('completed')
+    expect(resumed.copiedFiles).toBe(1)
+    expect(resumed.rollbackAvailable).toBe(true)
+    expect(stages).toContain('completed')
+    expect(await readFile(target, 'utf8')).toBe(content)
+    await expect(stat(temp)).rejects.toThrow()
+
+    const history = await listOrganizationExecutionHistory(userData)
+    expect(history[0].status).toBe('completed')
+    expect(history[0].completedFiles).toBe(1)
+    expect(history[0].resumable).toBe(false)
+  })
+
+  it('reconciles a pending publication before rolling back a mixed execution', async () => {
+    const root = await tempRoot()
+    const source = path.join(root, 'Anime')
+    const destination = path.join(root, 'Anime [Jellyfin]')
+    const userData = path.join(root, 'user-data')
+    await mkdir(source)
+    await writeFile(path.join(source, 'Anime - 01 [1080p].mkv'), 'episode-one-content')
+    await writeFile(path.join(source, 'Anime - 02 [1080p].mkv'), 'episode-two-content')
+
+    const plan = await approvedPlan(source, destination)
+    const executed = await executeOrganizationPlan(plan, userData, () => undefined, () => false)
+    expect(executed.status).toBe('completed')
+
+    const journalPath = path.join(userData, 'organization-executions', `${executed.runId}.json`)
+    const journal = JSON.parse(await readFile(journalPath, 'utf8')) as ExecutionJournal
+    const pendingItemIndex = journal.items!.length - 1
+    const pendingItem = journal.items![pendingItemIndex]
+    const pendingRecord = journal.files.find((file) => file.destinationRelativePath === pendingItem.destinationRelativePath)!
+    const target = path.join(destination, pendingItem.destinationRelativePath)
+    const tempRelativePath = path.join(
+      path.dirname(pendingItem.destinationRelativePath),
+      `.${path.basename(pendingItem.destinationRelativePath)}.${journal.runId}.${pendingItemIndex}.recovery.partial`
+    )
+    const temp = path.join(destination, tempRelativePath)
+    await link(target, temp)
+    const tempInfo = await stat(temp)
+    const targetBytes = await readFile(target)
+
+    journal.files = journal.files.filter((file) => file.destinationRelativePath !== pendingItem.destinationRelativePath)
+    journal.pendingPublication = {
+      sourceRelativePath: pendingItem.sourceRelativePath,
+      destinationRelativePath: pendingItem.destinationRelativePath,
+      tempRelativePath,
+      sizeBytes: pendingRecord.sizeBytes,
+      sha256: createHash('sha256').update(targetBytes).digest('hex'),
+      tempDevice: tempInfo.dev,
+      tempInode: tempInfo.ino,
+      modifiedAtMs: pendingItem.modifiedAtMs,
+      kind: pendingItem.kind,
+      itemIndex: pendingItemIndex,
+      method: 'hard-link'
+    }
+    journal.status = 'interrupted'
+    journal.finishedAt = null
+    await writeFile(journalPath, JSON.stringify(journal, null, 2))
+
+    const rollback = await rollbackOrganizationExecution(userData, executed.runId)
+
+    expect(rollback.removedFiles).toBe(2)
+    expect(rollback.skippedFiles).toBe(0)
+    for (const item of journal.items!) {
+      await expect(stat(path.join(destination, item.destinationRelativePath))).rejects.toThrow()
+      expect(await readFile(path.join(source, item.sourceRelativePath))).toBeTruthy()
+    }
+    await expect(stat(temp)).rejects.toThrow()
+
+    const history = await listOrganizationExecutionHistory(userData)
+    expect(history[0].status).toBe('rolled-back')
+    expect(history[0].completedFiles).toBe(2)
+    expect(history[0].rolledBackFiles).toBe(2)
+    expect(history[0].rollbackAvailable).toBe(false)
+  })
+
+  it('rolls back recorded files while preserving an unproven pending publication', async () => {
+    const root = await tempRoot()
+    const source = path.join(root, 'Anime')
+    const destination = path.join(root, 'Anime [Jellyfin]')
+    const userData = path.join(root, 'user-data')
+    await mkdir(source)
+    await writeFile(path.join(source, 'Anime - 01 [1080p].mkv'), 'episode-one-content')
+    await writeFile(path.join(source, 'Anime - 02 [1080p].mkv'), 'episode-two-content')
+
+    const plan = await approvedPlan(source, destination)
+    const executed = await executeOrganizationPlan(plan, userData, () => undefined, () => false)
+    const journalPath = path.join(userData, 'organization-executions', `${executed.runId}.json`)
+    const journal = JSON.parse(await readFile(journalPath, 'utf8')) as ExecutionJournal
+    const pendingItemIndex = journal.items!.length - 1
+    const pendingItem = journal.items![pendingItemIndex]
+    const pendingRecord = journal.files.find((file) => file.destinationRelativePath === pendingItem.destinationRelativePath)!
+    const target = path.join(destination, pendingItem.destinationRelativePath)
+    const tempRelativePath = path.join(
+      path.dirname(pendingItem.destinationRelativePath),
+      `.${path.basename(pendingItem.destinationRelativePath)}.${journal.runId}.${pendingItemIndex}.unproven.partial`
+    )
+    const temp = path.join(destination, tempRelativePath)
+    const targetBytes = await readFile(target)
+    await writeFile(temp, targetBytes)
+    const tempInfo = await stat(temp)
+
+    journal.files = journal.files.filter((file) => file.destinationRelativePath !== pendingItem.destinationRelativePath)
+    journal.pendingPublication = {
+      sourceRelativePath: pendingItem.sourceRelativePath,
+      destinationRelativePath: pendingItem.destinationRelativePath,
+      tempRelativePath,
+      sizeBytes: pendingRecord.sizeBytes,
+      sha256: createHash('sha256').update(targetBytes).digest('hex'),
+      tempDevice: tempInfo.dev,
+      tempInode: tempInfo.ino,
+      modifiedAtMs: pendingItem.modifiedAtMs,
+      kind: pendingItem.kind,
+      itemIndex: pendingItemIndex,
+      method: 'hard-link'
+    }
+    journal.status = 'interrupted'
+    journal.finishedAt = null
+    await writeFile(journalPath, JSON.stringify(journal, null, 2))
+
+    const rollback = await rollbackOrganizationExecution(userData, executed.runId)
+    const recordedItem = journal.items!.find((item) => item.destinationRelativePath !== pendingItem.destinationRelativePath)!
+    const recordedTarget = path.join(destination, recordedItem.destinationRelativePath)
+
+    expect(rollback.removedFiles).toBe(1)
+    expect(rollback.skippedFiles).toBe(1)
+    await expect(stat(recordedTarget)).rejects.toThrow()
+    expect(await readFile(target)).toEqual(targetBytes)
+    expect(await readFile(temp)).toEqual(targetBytes)
+    for (const item of journal.items!) {
+      expect(await readFile(path.join(source, item.sourceRelativePath), 'utf8')).toContain('episode-')
+    }
+
+    const history = await listOrganizationExecutionHistory(userData)
+    expect(history[0].status).toBe('partially-rolled-back')
+    expect(history[0].rolledBackFiles).toBe(1)
+    expect(history[0].rollbackAvailable).toBe(true)
+  })
+
+  it('keeps an unproven pending publication visible and retryable after rollback', async () => {
+    const root = await tempRoot()
+    const source = path.join(root, 'Anime')
+    const destination = path.join(root, 'Anime [Jellyfin]')
+    const userData = path.join(root, 'user-data')
+    await mkdir(source)
+    await mkdir(path.join(destination, 'Season 01'), { recursive: true })
+
+    const sourceName = 'Anime - 01 [1080p].mkv'
+    const content = 'same-content-but-independent-files'
+    await writeFile(path.join(source, sourceName), content)
+    const sourceInfo = await stat(path.join(source, sourceName))
+    const runId = randomUUID()
+    const relativeDestination = 'Season 01/Anime S01E01.mkv'
+    const tempRelativePath = `Season 01/.Anime S01E01.mkv.${runId}.0.partial`
+    const target = path.join(destination, relativeDestination)
+    const temp = path.join(destination, tempRelativePath)
+    await writeFile(temp, content)
+    const tempInfo = await stat(temp)
+    await writeFile(target, content)
+    const digest = createHash('sha256').update(content).digest('hex')
+    const item = {
+      sourceRelativePath: sourceName,
+      destinationRelativePath: relativeDestination,
+      sizeBytes: Buffer.byteLength(content),
+      modifiedAtMs: Math.trunc(sourceInfo.mtimeMs),
+      kind: 'video' as const
+    }
+    const journal: ExecutionJournal = {
+      schemaVersion: 2,
+      pendingRollback: null,
+      runId,
+      planId: 'plan-unproven-rollback',
+      createdAt: new Date().toISOString(),
+      finishedAt: null,
+      status: 'rolled-back',
+      sourcePath: source,
+      destinationPath: destination,
+      items: [item],
+      pendingPublication: {
+        sourceRelativePath: sourceName,
+        destinationRelativePath: relativeDestination,
+        tempRelativePath,
+        sizeBytes: item.sizeBytes,
+        sha256: digest,
+        tempDevice: tempInfo.dev,
+        tempInode: tempInfo.ino,
+        modifiedAtMs: item.modifiedAtMs,
+        kind: 'video',
+        itemIndex: 0,
+        method: 'hard-link'
+      },
+      files: [],
+      errors: [],
+      attempts: 1
+    }
+    const journalDirectory = path.join(userData, 'organization-executions')
+    await mkdir(journalDirectory, { recursive: true })
+    await writeFile(path.join(journalDirectory, `${runId}.json`), JSON.stringify(journal, null, 2))
+
+    const historyBeforeRollback = await listOrganizationExecutionHistory(userData)
+    expect(historyBeforeRollback[0].status).toBe('partially-rolled-back')
+    expect(historyBeforeRollback[0].rollbackAvailable).toBe(true)
+
+    const rollback = await rollbackOrganizationExecution(userData, runId)
+    expect(rollback.removedFiles).toBe(0)
+    expect(rollback.skippedFiles).toBe(1)
+    expect(rollback.errors.join(' ')).toMatch(/preservada para revisão manual/i)
+    expect(await readFile(target, 'utf8')).toBe(content)
+    expect(await readFile(temp, 'utf8')).toBe(content)
+
+    const history = await listOrganizationExecutionHistory(userData)
+    expect(history[0].status).toBe('partially-rolled-back')
+    expect(history[0].rollbackAvailable).toBe(true)
+    expect(history[0].errors.join(' ')).toMatch(/preservada para revisão manual/i)
+  })
+
   it('preserves a target when ownership of an interrupted publication cannot be proven', async () => {
     const root = await tempRoot()
     const source = path.join(root, 'Anime')

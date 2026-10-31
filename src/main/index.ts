@@ -44,7 +44,13 @@ function assertTrustedRenderer(event: Electron.IpcMainInvokeEvent): void {
     throw new Error('Solicitação rejeitada: origem IPC não autorizada.')
   }
 
-  const actualUrl = event.senderFrame?.url
+  const senderFrame = event.senderFrame
+  const mainFrame = mainWindow.webContents.mainFrame
+  if (!senderFrame || senderFrame.processId !== mainFrame.processId || senderFrame.routingId !== mainFrame.routingId) {
+    throw new Error('Solicitação rejeitada: somente o frame principal pode chamar a API IPC.')
+  }
+
+  const actualUrl = senderFrame.url
   const expectedUrl = mainWindow.webContents.getURL()
   if (!actualUrl || !expectedUrl) throw new Error('Não foi possível validar a origem da solicitação.')
 

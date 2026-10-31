@@ -65,6 +65,28 @@ describe('AniList search API client', () => {
     expect(second.cached).toBe(true)
   })
 
+  it('spaces the start of concurrent uncached requests', async () => {
+    const requestStartTimes: number[] = []
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      requestStartTimes.push(Date.now())
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { Page: { media: [sampleMedia] } } })
+      }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await searchAniListAnime('Concurrent limiter warm-up query')
+    const second = searchAniListAnime('Concurrent limiter second query')
+    const third = searchAniListAnime('Concurrent limiter third query')
+    await Promise.all([second, third])
+
+    expect(requestStartTimes).toHaveLength(3)
+    expect(requestStartTimes[1] - requestStartTimes[0]).toBeGreaterThanOrEqual(2_100)
+    expect(requestStartTimes[2] - requestStartTimes[1]).toBeGreaterThanOrEqual(2_100)
+  })
+
   it('provides a useful error for rate limiting', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

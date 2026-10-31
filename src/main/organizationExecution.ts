@@ -192,7 +192,7 @@ function toResult(journal: ExecutionJournal): ExecutionResult {
     copiedFiles: journal.files.length,
     copiedBytes: journal.files.reduce((sum, file) => sum + file.sizeBytes, 0),
     errors: [...journal.errors],
-    rollbackAvailable: journal.files.some((file) => !file.rolledBackAt) && journal.status !== 'rolled-back'
+    rollbackAvailable: Boolean(journal.pendingPublication) || (journal.files.some((file) => !file.rolledBackAt) && journal.status !== 'rolled-back')
   }
 }
 
@@ -555,8 +555,39 @@ export async function resumeOrganizationExecution(
   await reconcilePendingRollback(journal, userDataDir)
   await reconcilePendingPublication(journal, userDataDir)
   await cleanTempsForRecordedFiles(journal)
-  if (journal.files.length >= journal.items.length) throw new Error('Não há arquivos pendentes para retomar.')
   await verifyRecordedFiles(journal)
+
+  const itemDestinations = new Set(journal.items.map((item) => item.destinationRelativePath))
+  const recordedDestinations = new Set<string>()
+  for (const file of journal.files) {
+    if (!itemDestinations.has(file.destinationRelativePath) || recordedDestinations.has(file.destinationRelativePath)) {
+      throw new Error('O diário contém registros de destino inconsistentes; a retomada foi bloqueada por segurança.')
+    }
+    recordedDestinations.add(file.destinationRelativePath)
+  }
+
+  const allItemsRecorded = journal.items.every((item) => recordedDestinations.has(item.destinationRelativePath))
+  if (allItemsRecorded) {
+    journal.status = 'completed'
+    journal.finishedAt = new Date().toISOString()
+    journal.attempts = (journal.attempts ?? 1) + 1
+    await saveJournal(userDataDir, journal)
+    const totalBytes = journal.items.reduce((sum, item) => sum + item.sizeBytes, 0)
+    const copiedBytes = journal.files.reduce((sum, file) => sum + file.sizeBytes, 0)
+    emit({
+      runId: journal.runId,
+      planId: journal.planId,
+      stage: 'completed',
+      completedFiles: journal.files.length,
+      totalFiles: journal.items.length,
+      bytesCopied: copiedBytes,
+      totalBytes,
+      currentFile: null,
+      message: 'Recuperação concluída: todos os arquivos já estavam publicados e verificados.'
+    })
+    return toResult(journal)
+  }
+
   await validateRemainingItems(journal)
   journal.status = 'running'
   journal.finishedAt = null
@@ -607,7 +638,7 @@ export async function listOrganizationExecutionHistory(userDataDir: string): Pro
         planId: journal.planId,
         createdAt: journal.createdAt,
         finishedAt: journal.finishedAt,
-        status: journal.status,
+        status: journal.status === 'rolled-back' && journal.pendingPublication ? 'partially-rolled-back' : journal.status,
         sourcePath: journal.sourcePath,
         destinationPath: journal.destinationPath,
         totalFiles,
@@ -618,7 +649,7 @@ export async function listOrganizationExecutionHistory(userDataDir: string): Pro
         attempts: journal.attempts ?? 1,
         errors: [...journal.errors],
         resumable: Boolean(journal.items?.length && remainingFiles > 0 && RESUMABLE_STATUSES.has(journal.status)),
-        rollbackAvailable: journal.files.some((file) => !file.rolledBackAt) && journal.status !== 'rolled-back'
+        rollbackAvailable: Boolean(journal.pendingPublication) || (journal.files.some((file) => !file.rolledBackAt) && journal.status !== 'rolled-back')
       })
     } catch {
       // Skip malformed/corrupt history files rather than blocking all history.
@@ -670,20 +701,41 @@ async function reconcilePendingRollback(journal: ExecutionJournal, userDataDir: 
 
 export async function rollbackOrganizationExecution(userDataDir: string, runId: string): Promise<RollbackResult> {
   const journal = await readJournal(userDataDir, runId)
-  if (journal.status === 'rolled-back') return { runId, removedFiles: 0, skippedFiles: 0, errors: ['Esta execução já foi revertida.'] }
+  if (journal.status === 'rolled-back' && !journal.pendingPublication) return { runId, removedFiles: 0, skippedFiles: 0, errors: ['Esta execução já foi revertida.'] }
   // Rollback only touches destination files. If the original source directory
   // still exists, verify physical source/destination separation first.
   const sourceInfo = await lstatMissing(journal.sourcePath)
   if (sourceInfo) await assertSafeSourceAndDestinationPhysical(journal.sourcePath, journal.destinationPath)
 
-  let removedFiles = await reconcilePendingRollback(journal, userDataDir) ? 1 : 0
+  let removedFiles = 0
   let skippedFiles = 0
   const errors: string[] = []
+
+  // A publication may have reached its final path immediately before a crash,
+  // while its file record was not yet committed to the journal. Reconcile it
+  // before deciding which destination files belong to this execution.
+  if (journal.pendingPublication) {
+    try {
+      await reconcilePendingPublication(journal, userDataDir)
+    } catch (error) {
+      skippedFiles += 1
+      const detail = error instanceof Error ? error.message : String(error)
+      const message = `Publicação pendente preservada para revisão manual: ${detail}`
+      errors.push(message)
+      if (!journal.errors.includes(message)) journal.errors.push(message)
+    }
+  }
+
+  removedFiles += await reconcilePendingRollback(journal, userDataDir) ? 1 : 0
   journal.status = 'partially-rolled-back'
   await saveJournal(userDataDir, journal)
 
+  const unresolvedPublicationPath = journal.pendingPublication?.destinationRelativePath ?? null
   for (const file of [...journal.files].reverse()) {
     if (file.rolledBackAt) continue
+    // If a pending publication for the same destination could not be proven,
+    // do not let an older record authorize deleting that ambiguous path.
+    if (unresolvedPublicationPath && file.destinationRelativePath === unresolvedPublicationPath) continue
     try {
       const target = await assertNoSymlinkParents(journal.destinationPath, file.destinationRelativePath, true)
       const info = await lstatMissing(target)
@@ -732,7 +784,9 @@ export async function rollbackOrganizationExecution(userDataDir: string, runId: 
     }
   }
 
-  journal.status = journal.files.every((file) => Boolean(file.rolledBackAt)) ? 'rolled-back' : 'partially-rolled-back'
+  journal.status = !journal.pendingPublication && journal.files.every((file) => Boolean(file.rolledBackAt))
+    ? 'rolled-back'
+    : 'partially-rolled-back'
   journal.finishedAt = new Date().toISOString()
   await saveJournal(userDataDir, journal)
   return { runId, removedFiles, skippedFiles, errors }
