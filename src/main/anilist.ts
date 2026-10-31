@@ -18,6 +18,7 @@ interface AniListPayload {
 
 const resultCache = new Map<string, AniListAnime[]>()
 let lastRequestAt = 0
+let requestSlotQueue: Promise<void> = Promise.resolve()
 
 const SEARCH_QUERY = `
   query SearchAnime($search: String!, $perPage: Int!) {
@@ -93,9 +94,15 @@ function errorMessage(status: number, payload: AniListPayload): string {
 }
 
 async function waitForRequestSlot(): Promise<void> {
-  const waitMs = Math.max(0, lastRequestAt + MIN_REQUEST_INTERVAL_MS - Date.now())
-  if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
-  lastRequestAt = Date.now()
+  const scheduledSlot = requestSlotQueue.then(async () => {
+    const waitMs = Math.max(0, lastRequestAt + MIN_REQUEST_INTERVAL_MS - Date.now())
+    if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
+    lastRequestAt = Date.now()
+  })
+
+  // Keep the queue usable even if a scheduled slot unexpectedly rejects.
+  requestSlotQueue = scheduledSlot.catch(() => undefined)
+  await scheduledSlot
 }
 
 export async function searchAniListAnime(input: string): Promise<AniListSearchResponse> {

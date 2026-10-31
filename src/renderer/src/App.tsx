@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, ArrowRight, Check, CheckCircle2, ChevronDown, ClipboardList, CircleDot, ExternalLink, FileText, FileVideo, Folder, FolderOpen, HardDrive, History, Home, Info, Layers, List, Plus, RefreshCw, Search, Settings, ShieldCheck, X, type LucideIcon } from 'lucide-react'
 import type { ContentKind, EpisodeCorrection, ExecutionHistoryEntry, ExecutionProgress, ExecutionResult, RollbackResult, ScanResult, PreviewRow, OrganizationPlan, PlanItemStatus } from '../../shared/types'
 import type { AniListAnime } from '../../shared/anilistTypes'
@@ -52,7 +52,7 @@ function EmptyState({ onPick }: { onPick: () => void }) {
     <div className="empty-state">
       <div className="empty-illustration"><FolderOpen size={31} strokeWidth={1.7} aria-hidden="true" /><i><Plus size={14} strokeWidth={2} aria-hidden="true" /></i></div>
       <h2>Vamos organizar seus animes?</h2>
-      <p>Escolha a pasta da série. A versão 1.0.0 reúne identificação, metadados, plano e cópia verificada; a origem permanece intacta.</p>
+      <p>Escolha a pasta da série. A versão 1.0.1 reúne identificação, metadados, plano e cópia verificada; a origem permanece intacta.</p>
       <button className="button button-primary" onClick={onPick}>Escolher pasta de origem</button>
     </div>
   )
@@ -98,6 +98,39 @@ export default function App() {
   const [historyBusy, setHistoryBusy] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const [historyActionRunId, setHistoryActionRunId] = useState<string | null>(null)
+  const analysisRequestId = useRef(0)
+  const planRequestId = useRef(0)
+  const aniListSearchRequestId = useRef(0)
+
+  function invalidateAnalysisRequest(): void {
+    analysisRequestId.current += 1
+    aniListSearchRequestId.current += 1
+    setBusy(false)
+    setAniListBusy(false)
+    setCorrectionBusy(false)
+
+    // A changed preview context invalidates any in-flight plan request and
+    // revokes approval of a plan built from the previous context. Keep the
+    // active plan intact while copying so its cancel action remains available.
+    if (!executionBusy) {
+      planRequestId.current += 1
+      setPlanBusy(false)
+      setOrganizationPlan((current) => {
+        if (!current) return current
+        const reason = 'O contexto da prévia foi alterado. Revalide o plano antes de aprová-lo novamente.'
+        const issues = current.validation?.issues ?? []
+        return {
+          ...current,
+          approvedAt: null,
+          validation: {
+            checkedAt: new Date().toISOString(),
+            fresh: false,
+            issues: issues.includes(reason) ? issues : [...issues, reason]
+          }
+        }
+      })
+    }
+  }
 
   useEffect(() => window.kageShelf.onExecutionProgress(setExecutionProgress), [])
   useEffect(() => { if (activeNav === 'Relatórios') void refreshExecutionHistory() }, [activeNav])
@@ -142,15 +175,19 @@ export default function App() {
   const treeRows = treeGroupsVisible.flatMap((group) => group.items)
 
   async function pickSource(): Promise<void> {
+    if (executionBusy) return
     setError('')
     setNotice('')
+    let selectionRequestId: number | null = null
     try {
       const picked = await window.kageShelf.selectDirectory(sourcePath || undefined)
       if (!picked) return
+      invalidateAnalysisRequest()
+      selectionRequestId = analysisRequestId.current
       setSourcePath(picked)
-      const suggested = await window.kageShelf.defaultDestination(picked)
-      setDestinationPath(suggested)
+      setDestinationPath('')
       setDestinationIsAutomatic(true)
+      // Clear the previous preview/plan context before waiting for IPC.
       setResult(null)
       setBaseResult(null)
       setSelectedRow(null)
@@ -160,17 +197,25 @@ export default function App() {
       setSelectedAnime(null)
       setAniListError('')
       setAniListNotice('')
+
+      const suggested = await window.kageShelf.defaultDestination(picked)
+      // Do not let a stale picker response overwrite a newer path selection.
+      if (selectionRequestId === null || analysisRequestId.current !== selectionRequestId) return
+      setDestinationPath(suggested)
     } catch (cause) {
+      if (selectionRequestId !== null && analysisRequestId.current !== selectionRequestId) return
       setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
   async function pickDestination(): Promise<void> {
+    if (executionBusy) return
     setError('')
     setNotice('')
     try {
       const picked = await window.kageShelf.selectDirectory(destinationPath || undefined)
       if (!picked) return
+      invalidateAnalysisRequest()
       setDestinationPath(picked)
       setDestinationIsAutomatic(false)
       setResult(null)
@@ -182,13 +227,23 @@ export default function App() {
   }
 
   async function analyze(): Promise<void> {
+    if (executionBusy) return
+    invalidateAnalysisRequest()
+    const requestId = analysisRequestId.current
+    const requestedSourcePath = sourcePath
+    const requestedDestinationPath = destinationPath
+    const useAutomaticDestination = destinationIsAutomatic
+    const isCurrentRequest = () => analysisRequestId.current === requestId
+
     setError('')
     setNotice('')
     setSelectedRow(null)
     setCorrectionError('')
     setBusy(true)
     try {
-      const scanned = await window.kageShelf.scan(sourcePath, destinationPath)
+      const scanned = await window.kageShelf.scan(requestedSourcePath, requestedDestinationPath)
+      if (!isCurrentRequest()) return
+
       setBaseResult(scanned)
       setDestinationPath(scanned.destinationPath)
       setAniListQuery(scanned.seriesName)
@@ -199,24 +254,29 @@ export default function App() {
 
       let corrections: EpisodeCorrection[] = []
       try {
-        corrections = await window.kageShelf.getEpisodeCorrections(sourcePath)
+        corrections = await window.kageShelf.getEpisodeCorrections(requestedSourcePath)
       } catch (correctionCause) {
+        if (!isCurrentRequest()) return
         setCorrectionError(correctionCause instanceof Error ? correctionCause.message : String(correctionCause))
       }
+      if (!isCurrentRequest()) return
+
       setEpisodeCorrections(corrections)
       const correctedPreview = applyEpisodeCorrectionsToPreview(scanned, corrections)
       let shownPreview = correctedPreview
       let targetPath = scanned.destinationPath
 
       try {
-        const association = await window.kageShelf.getAniListAssociation(sourcePath)
+        const association = await window.kageShelf.getAniListAssociation(requestedSourcePath)
+        if (!isCurrentRequest()) return
         if (association) {
-          if (destinationIsAutomatic) {
+          if (useAutomaticDestination) {
             targetPath = await window.kageShelf.defaultDestinationForAnime(
-              sourcePath,
+              requestedSourcePath,
               preferredAniListTitle(association.anime, scanned.seriesName),
               aniListYear(association.anime)
             )
+            if (!isCurrentRequest()) return
           }
           setSelectedAnime(association.anime)
           setAniListQuery(preferredAniListTitle(association.anime, scanned.seriesName))
@@ -224,8 +284,10 @@ export default function App() {
           shownPreview = applyAniListMetadataToPreview(correctedPreview, association.anime, targetPath)
         }
       } catch (associationCause) {
+        if (!isCurrentRequest()) return
         setAniListError(associationCause instanceof Error ? associationCause.message : String(associationCause))
       }
+      if (!isCurrentRequest()) return
 
       setDestinationPath(targetPath)
       setResult(shownPreview)
@@ -234,12 +296,13 @@ export default function App() {
       if (warningCount > 0) setNotice('Análise concluída com observações. Confira os conflitos e os itens que precisam de revisão.')
       else setNotice(`Análise concluída em ${scanned.scanDurationMs} ms. Nenhum arquivo foi alterado.`)
     } catch (cause) {
+      if (!isCurrentRequest()) return
       setError(cause instanceof Error ? cause.message : String(cause))
       setResult(null)
       setBaseResult(null)
       setEpisodeCorrections([])
     } finally {
-      setBusy(false)
+      if (isCurrentRequest()) setBusy(false)
     }
   }
 
@@ -249,16 +312,19 @@ export default function App() {
   }
 
   async function generateOrganizationPlan(): Promise<void> {
+    if (executionBusy) return
     if (!result) {
       setPlanError('Analise uma pasta antes de gerar um plano de organização.')
       setActiveNav('Plano')
       return
     }
+    const requestId = ++planRequestId.current
     setPlanBusy(true)
     setPlanError('')
     setPlanNotice('')
     try {
       const plan = await window.kageShelf.buildOrganizationPlan(result, selectedAnime?.id ?? null)
+      if (requestId !== planRequestId.current) return
       setOrganizationPlan(plan)
       setExecutionProgress(null)
       setExecutionResult(null)
@@ -267,39 +333,43 @@ export default function App() {
       setPlanNotice(`Plano ${plan.id.slice(0, 8)} gerado. Nenhum arquivo foi alterado.`)
       setActiveNav('Plano')
     } catch (cause) {
+      if (requestId !== planRequestId.current) return
       setPlanError(cause instanceof Error ? cause.message : String(cause))
       setActiveNav('Plano')
     } finally {
-      setPlanBusy(false)
+      if (requestId === planRequestId.current) setPlanBusy(false)
     }
   }
 
   async function revalidateOrganizationPlan(): Promise<void> {
-    if (!organizationPlan) return
+    if (!organizationPlan || executionBusy) return
     const currentSignature = result ? previewSignature(result) : null
     if (currentSignature !== organizationPlan.previewSignature) {
       setPlanError('A prévia mudou desde a geração deste plano. Gere um novo plano antes de validá-lo.')
       return
     }
+    const requestId = ++planRequestId.current
     setPlanBusy(true)
     setPlanError('')
     setPlanNotice('')
     try {
       const validation = await window.kageShelf.validateOrganizationPlan(organizationPlan)
+      if (requestId !== planRequestId.current) return
       const updated = { ...organizationPlan, validation, approvedAt: null }
       setOrganizationPlan(updated)
       setPlanNotice(validation.fresh
         ? 'A origem e os destinos foram rechecados. O plano continua somente leitura.'
         : 'Foram detectadas mudanças desde a geração do plano. Reanalise e gere um plano novo.')
     } catch (cause) {
+      if (requestId !== planRequestId.current) return
       setPlanError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setPlanBusy(false)
+      if (requestId === planRequestId.current) setPlanBusy(false)
     }
   }
 
   async function approveOrganizationPlan(): Promise<void> {
-    if (!organizationPlan) return
+    if (!organizationPlan || executionBusy) return
     const currentSignature = result ? previewSignature(result) : null
     const blockers = planBlockerMessages(organizationPlan, currentSignature)
     if (blockers.length > 0 || !planCanBeApproved(organizationPlan, currentSignature)) {
@@ -309,21 +379,33 @@ export default function App() {
 
     // Recheck the filesystem immediately before a local approval. This is still
     // a read-only operation; it does not execute the plan.
+    const requestId = ++planRequestId.current
     setPlanBusy(true)
     setPlanError('')
     try {
       const approval = await window.kageShelf.approveOrganizationPlan(organizationPlan.id, organizationPlan.previewSignature)
+      if (requestId !== planRequestId.current) return
       setOrganizationPlan({ ...organizationPlan, validation: approval.validation, approvedAt: approval.approvedAt })
       setPlanNotice('Plano aprovado. A cópia só começa após uma segunda confirmação explícita.')
     } catch (cause) {
+      if (requestId !== planRequestId.current) return
       setPlanError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setPlanBusy(false)
+      if (requestId === planRequestId.current) setPlanBusy(false)
     }
   }
 
   async function executeApprovedOrganizationPlan(): Promise<void> {
-    if (!organizationPlan || !organizationPlan.approvedAt || executionBusy) return
+    if (!organizationPlan || !organizationPlan.approvedAt || executionBusy || planBusy) return
+    const currentSignature = result ? previewSignature(result) : null
+    if (currentSignature !== organizationPlan.previewSignature) {
+      setPlanError('A prévia mudou desde a geração deste plano. Gere um novo plano antes de executar a cópia.')
+      return
+    }
+    if (!organizationPlan.validation?.fresh) {
+      setPlanError('Revalide o plano antes de executar a cópia.')
+      return
+    }
     if (!window.confirm(`Copiar ${organizationPlan.items.length} arquivos (${formatBytes(organizationPlan.summary.totalBytes)}) para:
 ${organizationPlan.destinationPath}
 
@@ -432,11 +514,15 @@ A origem será preservada. Continuar?`)) return
   }
 
   async function searchAniList(): Promise<void> {
+    if (executionBusy) return
+    const requestId = ++aniListSearchRequestId.current
+    const query = aniListQuery
     setAniListError('')
     setAniListNotice('')
     setAniListBusy(true)
     try {
-      const response = await window.kageShelf.searchAniList(aniListQuery)
+      const response = await window.kageShelf.searchAniList(query)
+      if (requestId !== aniListSearchRequestId.current) return
       setAniListResults(response.results)
       if (response.results.length === 0) {
         setAniListNotice('Nenhuma correspondência encontrada. Tente outro título ou pesquise pelo nome romanizado.')
@@ -446,72 +532,102 @@ A origem será preservada. Continuar?`)) return
         setAniListNotice(`${response.results.length} candidato(s) encontrado(s). Confira o ano e o formato antes de associar.`)
       }
     } catch (cause) {
+      if (requestId !== aniListSearchRequestId.current) return
       setAniListError(cause instanceof Error ? cause.message : String(cause))
       setAniListResults([])
     } finally {
-      setAniListBusy(false)
+      if (requestId === aniListSearchRequestId.current) setAniListBusy(false)
     }
   }
 
   async function chooseAniListAnime(anime: AniListAnime): Promise<void> {
+    if (executionBusy) return
     if (!sourcePath.trim() || !baseResult) {
       setAniListError('Analise uma pasta antes de associar os metadados do AniList.')
       return
     }
 
+    invalidateAnalysisRequest()
+    const requestId = analysisRequestId.current
+    const requestedSourcePath = sourcePath
+    const requestedBaseResult = baseResult
+    const requestedCorrections = episodeCorrections
+    const requestedDestinationPath = destinationPath
+    const useAutomaticDestination = destinationIsAutomatic
+    const requestedSelectedRow = selectedRow
+
     setAniListBusy(true)
     setAniListError('')
     setAniListNotice('')
     try {
-      let targetPath = destinationPath || baseResult.destinationPath
-      if (destinationIsAutomatic) {
+      let targetPath = requestedDestinationPath || requestedBaseResult.destinationPath
+      if (useAutomaticDestination) {
         targetPath = await window.kageShelf.defaultDestinationForAnime(
-          sourcePath,
-          preferredAniListTitle(anime, baseResult.seriesName),
+          requestedSourcePath,
+          preferredAniListTitle(anime, requestedBaseResult.seriesName),
           aniListYear(anime)
         )
+        if (analysisRequestId.current !== requestId) return
       }
-      await window.kageShelf.saveAniListAssociation(sourcePath, anime)
+      await window.kageShelf.saveAniListAssociation(requestedSourcePath, anime)
+      if (analysisRequestId.current !== requestId) return
       setSelectedAnime(anime)
       setAniListResults([])
-      setAniListQuery(preferredAniListTitle(anime, baseResult.seriesName))
+      setAniListQuery(preferredAniListTitle(anime, requestedBaseResult.seriesName))
       setDestinationPath(targetPath)
-      const correctedBase = applyEpisodeCorrectionsToPreview(baseResult, episodeCorrections)
+      const correctedBase = applyEpisodeCorrectionsToPreview(requestedBaseResult, requestedCorrections)
       const metadataPreview = applyAniListMetadataToPreview(correctedBase, anime, targetPath)
       setResult(metadataPreview)
-      if (selectedRow) setSelectedRow(metadataPreview.rows.find((row) => row.id === selectedRow.id) ?? null)
+      if (requestedSelectedRow) setSelectedRow(metadataPreview.rows.find((row) => row.id === requestedSelectedRow.id) ?? null)
       setAniListNotice(`Associado a “${metadataPreview.seriesName}”. A escolha foi salva localmente e atualizou a prévia; cada episódio ainda precisa ser validado.`)
       setNotice('Metadados aplicados à prévia. Nenhum arquivo foi alterado.')
     } catch (cause) {
+      if (analysisRequestId.current !== requestId) return
       setAniListError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setAniListBusy(false)
+      if (analysisRequestId.current === requestId) setAniListBusy(false)
     }
   }
 
   async function clearAniListAnime(): Promise<void> {
+    if (executionBusy) return
+    invalidateAnalysisRequest()
+    const requestId = analysisRequestId.current
+    const requestedSourcePath = sourcePath
+    const requestedBaseResult = baseResult
+    const requestedCorrections = episodeCorrections
+    const requestedDestinationPath = destinationPath
+    const useAutomaticDestination = destinationIsAutomatic
+    const requestedSelectedRow = selectedRow
+
     setAniListBusy(true)
     setAniListError('')
     try {
-      if (sourcePath.trim()) await window.kageShelf.removeAniListAssociation(sourcePath)
+      if (requestedSourcePath.trim()) await window.kageShelf.removeAniListAssociation(requestedSourcePath)
+      if (analysisRequestId.current !== requestId) return
+
+      let resetPath = requestedDestinationPath || requestedBaseResult?.destinationPath || ''
+      if (requestedBaseResult && useAutomaticDestination) {
+        resetPath = await window.kageShelf.defaultDestination(requestedSourcePath)
+        if (analysisRequestId.current !== requestId) return
+      }
+
       setSelectedAnime(null)
       setAniListResults([])
-      if (baseResult) {
-        const resetPath = destinationIsAutomatic
-          ? await window.kageShelf.defaultDestination(sourcePath)
-          : destinationPath || baseResult.destinationPath
-        const correctedBase = applyEpisodeCorrectionsToPreview(baseResult, episodeCorrections)
+      if (requestedBaseResult) {
+        const correctedBase = applyEpisodeCorrectionsToPreview(requestedBaseResult, requestedCorrections)
         const restored = revalidatePreview(correctedBase, correctedBase.seriesName, resetPath)
         setResult(restored)
         setDestinationPath(resetPath)
-        setSelectedRow(selectedRow ? restored.rows.find((row) => row.id === selectedRow.id) ?? null : null)
+        setSelectedRow(requestedSelectedRow ? restored.rows.find((row) => row.id === requestedSelectedRow.id) ?? null : null)
       }
       setAniListNotice('Associação local removida. A prévia voltou a usar o nome da pasta de origem. Nenhum arquivo foi alterado.')
       setNotice('Associação removida. Nenhum arquivo foi alterado.')
     } catch (cause) {
+      if (analysisRequestId.current !== requestId) return
       setAniListError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setAniListBusy(false)
+      if (analysisRequestId.current === requestId) setAniListBusy(false)
     }
   }
 
@@ -533,6 +649,7 @@ A origem será preservada. Continuar?`)) return
 
   async function saveManualCorrection(event?: FormEvent<HTMLFormElement>): Promise<void> {
     event?.preventDefault()
+    if (executionBusy) return
     if (!selectedRow || !baseResult || !sourcePath.trim()) return
     setCorrectionError('')
 
@@ -561,9 +678,12 @@ A origem será preservada. Continuar?`)) return
       updatedAt: new Date().toISOString()
     }
 
+    invalidateAnalysisRequest()
+    const requestId = analysisRequestId.current
     setCorrectionBusy(true)
     try {
       const saved = await window.kageShelf.saveEpisodeCorrection(sourcePath, correction)
+      if (analysisRequestId.current !== requestId) return
       const nextCorrections = [...episodeCorrections.filter((item) => item.relativePath !== saved.relativePath), saved]
       setEpisodeCorrections(nextCorrections)
       const nextPreview = currentPreviewWithCorrections(nextCorrections)
@@ -575,18 +695,23 @@ A origem será preservada. Continuar?`)) return
       }
       setNotice('Correção salva localmente e aplicada à prévia. Nenhum arquivo foi alterado.')
     } catch (cause) {
+      if (analysisRequestId.current !== requestId) return
       setCorrectionError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setCorrectionBusy(false)
+      if (analysisRequestId.current === requestId) setCorrectionBusy(false)
     }
   }
 
   async function removeManualCorrection(): Promise<void> {
+    if (executionBusy) return
     if (!selectedRow || !sourcePath.trim()) return
+    invalidateAnalysisRequest()
+    const requestId = analysisRequestId.current
     setCorrectionBusy(true)
     setCorrectionError('')
     try {
       await window.kageShelf.removeEpisodeCorrection(sourcePath, selectedRow.relativePath)
+      if (analysisRequestId.current !== requestId) return
       const nextCorrections = episodeCorrections.filter((item) => item.relativePath !== selectedRow.relativePath)
       setEpisodeCorrections(nextCorrections)
       const nextPreview = currentPreviewWithCorrections(nextCorrections)
@@ -598,9 +723,10 @@ A origem será preservada. Continuar?`)) return
       }
       setNotice('Correção removida. A identificação automática voltou à prévia; nenhum arquivo foi alterado.')
     } catch (cause) {
+      if (analysisRequestId.current !== requestId) return
       setCorrectionError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setCorrectionBusy(false)
+      if (analysisRequestId.current === requestId) setCorrectionBusy(false)
     }
   }
 
@@ -624,7 +750,7 @@ A origem será preservada. Continuar?`)) return
           <div className="brand-mark"><Layers size={23} strokeWidth={1.7} aria-hidden="true" /></div>
           <div className="brand-copy">
             <div className="brand-title">Kage<span>Shelf</span></div>
-            <div className="brand-version">VERSÃO <b>v1.0.0</b></div>
+            <div className="brand-version">VERSÃO <b>v1.0.1</b></div>
           </div>
         </div>
 
@@ -649,7 +775,7 @@ A origem será preservada. Continuar?`)) return
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className="online-dot" /> Versão estável 1.0.0
+          <span className="online-dot" /> Versão 1.0.1
         </div>
       </aside>
 
@@ -667,14 +793,14 @@ A origem será preservada. Continuar?`)) return
             <div className="page-heading"><div><div className="eyebrow">PREFERÊNCIAS</div><h1>Configurações</h1><p>Preferências locais do aplicativo.</p></div></div>
             <div className="settings-card">
               <h3>Versão e comportamento</h3>
-              <div className="setting-row"><div><strong>Versão do aplicativo</strong><p>KageShelf 1.0.0</p></div><span className="setting-value">Estável</span></div>
+              <div className="setting-row"><div><strong>Versão do aplicativo</strong><p>KageShelf 1.0.1</p></div><span className="setting-value">Estável</span></div>
               <div className="setting-row"><div><strong>Operações de arquivos</strong><p>Cópias aprovadas são verificadas por SHA-256; a origem é preservada.</p></div><span className="setting-value setting-safe">Cópia verificada</span></div>
               <div className="setting-row"><div><strong>Seguimento de links simbólicos</strong><p>Pastas e arquivos simbólicos são ignorados durante a varredura.</p></div><span className="setting-value">Desativado</span></div>
             </div>
           </section>
         ) : activeNav === 'Relatórios' ? (
           <section className="page-content">
-            <div className="page-heading"><div><div className="eyebrow">HISTÓRICO LOCAL · 1.0.0</div><h1>Execuções</h1><p>Operações salvas localmente. Execuções interrompidas podem ser retomadas após revalidar origem e destino.</p></div><button className="button button-secondary" onClick={() => void refreshExecutionHistory()} disabled={historyBusy}>{historyBusy ? 'Atualizando…' : 'Atualizar histórico'}</button></div>
+            <div className="page-heading"><div><div className="eyebrow">HISTÓRICO LOCAL · 1.0.1</div><h1>Execuções</h1><p>Operações salvas localmente. Execuções interrompidas podem ser retomadas após revalidar origem e destino.</p></div><button className="button button-secondary" onClick={() => void refreshExecutionHistory()} disabled={historyBusy}>{historyBusy ? 'Atualizando…' : 'Atualizar histórico'}</button></div>
             {historyError && <div className="alert alert-error"><span><AlertTriangle size={14} strokeWidth={1.9} aria-hidden="true" /></span><p>{historyError}</p><button onClick={() => setHistoryError('')} aria-label="Fechar aviso"><X size={14} strokeWidth={1.9} aria-hidden="true" /></button></div>}
             {executionError && <div className="alert alert-error"><span><AlertTriangle size={14} strokeWidth={1.9} aria-hidden="true" /></span><p>{executionError}</p><button onClick={() => setExecutionError('')} aria-label="Fechar aviso"><X size={14} strokeWidth={1.9} aria-hidden="true" /></button></div>}
             {executionBusy && historyActionRunId && <section className="execution-card"><strong>Retomando execução {historyActionRunId.slice(0, 8)}</strong><p>{executionProgress?.message ?? 'Revalidando os arquivos…'}</p>{executionProgress && <><div className="execution-progress-track"><span style={{ width: `${executionProgress.totalBytes > 0 ? Math.min(100, (executionProgress.bytesCopied / executionProgress.totalBytes) * 100) : 0}%` }} /></div><small>{executionProgress.completedFiles}/{executionProgress.totalFiles} arquivo(s) · {formatBytes(executionProgress.bytesCopied)} / {formatBytes(executionProgress.totalBytes)}</small><button className="button button-danger" onClick={() => void window.kageShelf.cancelOrganizationExecution(historyActionRunId)}>Cancelar retomada</button></>}</section>}
@@ -684,7 +810,7 @@ A origem será preservada. Continuar?`)) return
           <section className="page-content plan-page">
             <div className="page-heading">
               <div>
-                <div className="eyebrow">1.0.0 · CÓPIA VERIFICADA</div>
+                <div className="eyebrow">1.0.1 · CÓPIA VERIFICADA</div>
                 <h1>Plano de organização</h1>
                 <p>Revalide, aprove e confirme antes de copiar. Cada arquivo é verificado por SHA-256.</p>
               </div>
@@ -697,10 +823,10 @@ A origem será preservada. Continuar?`)) return
             {!result ? (
               <div className="empty-panel plan-empty"><div className="panel-symbol"><ClipboardList size={23} strokeWidth={1.7} aria-hidden="true" /></div><h3>Faça uma análise primeiro</h3><p>O plano precisa de uma prévia atual. Volte ao início, selecione a origem e analise a biblioteca.</p><button className="button button-primary" onClick={() => setActiveNav('Início')}>Ir para análise</button></div>
             ) : !organizationPlan ? (
-              <div className="empty-panel plan-empty"><div className="panel-symbol"><ClipboardList size={23} strokeWidth={1.7} aria-hidden="true" /></div><h3>Nenhum plano foi gerado</h3><p>Usaremos a prévia atual, incluindo a associação do AniList e as correções salvas, para preparar a lista de operações proposta.</p><button className="button button-primary" onClick={() => void generateOrganizationPlan()} disabled={planBusy}>{planBusy ? 'Gerando plano…' : 'Gerar plano de organização'}</button></div>
+              <div className="empty-panel plan-empty"><div className="panel-symbol"><ClipboardList size={23} strokeWidth={1.7} aria-hidden="true" /></div><h3>Nenhum plano foi gerado</h3><p>Usaremos a prévia atual, incluindo a associação do AniList e as correções salvas, para preparar a lista de operações proposta.</p><button className="button button-primary" onClick={() => void generateOrganizationPlan()} disabled={planBusy || executionBusy}>{planBusy ? 'Gerando plano…' : 'Gerar plano de organização'}</button></div>
             ) : (
               <>
-                {!planPreviewIsCurrent && <div className="plan-banner plan-banner-danger"><strong>Plano desatualizado</strong><span>A prévia atual mudou depois que este plano foi criado. Gere um plano novo antes de validar ou aprovar.</span><button className="button button-secondary" onClick={() => void generateOrganizationPlan()} disabled={planBusy}>Gerar novo plano</button></div>}
+                {!planPreviewIsCurrent && <div className="plan-banner plan-banner-danger"><strong>Plano desatualizado</strong><span>A prévia atual mudou depois que este plano foi criado. Gere um plano novo antes de validar ou aprovar.</span><button className="button button-secondary" onClick={() => void generateOrganizationPlan()} disabled={planBusy || executionBusy}>Gerar novo plano</button></div>}
                 {organizationPlan.analysisOutdated && <div className="plan-banner plan-banner-danger"><strong>A origem mudou antes da geração</strong><span>Alguns arquivos não correspondem à análise usada. Reanalise a biblioteca e gere outro plano.</span><button className="button button-secondary" onClick={() => { setActiveNav('Prévia'); setNotice('Reanalise a biblioteca para atualizar a lista de vídeos e legendas.') }}>Ir para prévia</button></div>}
 
                 <div className="plan-summary-grid">
@@ -724,10 +850,16 @@ A origem será preservada. Continuar?`)) return
                     <div><span>PLANO</span><code>{organizationPlan.id} · {new Date(organizationPlan.generatedAt).toLocaleString()}</code></div>
                   </div>
                   <div className="plan-actions">
-                    <button className="button button-secondary" onClick={() => void generateOrganizationPlan()} disabled={planBusy}>{planBusy ? 'Gerando…' : <><RefreshCw size={14} aria-hidden="true" /> Regenerar</>}</button>
-                    <button className="button button-secondary" onClick={() => void revalidateOrganizationPlan()} disabled={planBusy || !planPreviewIsCurrent}>{planBusy ? 'Verificando…' : 'Revalidar plano'}</button>
+                    <button className="button button-secondary" onClick={() => void generateOrganizationPlan()} disabled={planBusy || executionBusy}>{planBusy ? 'Gerando…' : <><RefreshCw size={14} aria-hidden="true" /> Regenerar</>}</button>
+                    <button className="button button-secondary" onClick={() => void revalidateOrganizationPlan()} disabled={planBusy || executionBusy || !planPreviewIsCurrent}>{planBusy ? 'Verificando…' : 'Revalidar plano'}</button>
                     <button className="button button-primary" onClick={() => void approveOrganizationPlan()} disabled={!canApproveCurrentPlan || planBusy || executionBusy} title={planBlockers.join(' ')}>{organizationPlan.approvedAt && planPreviewIsCurrent ? 'Plano aprovado' : 'Aprovar plano'}</button>
-                    {executionBusy ? <button className="button button-danger" onClick={() => void cancelApprovedOrganizationPlan()}>Cancelar cópia</button> : organizationPlan.approvedAt && organizationPlan.validation?.fresh && !executionResult ? <button className="button button-primary" onClick={() => void executeApprovedOrganizationPlan()}>Executar cópia verificada</button> : null}
+                    {executionBusy
+                      ? historyActionRunId
+                        ? <button className="button button-danger" onClick={() => void window.kageShelf.cancelOrganizationExecution(historyActionRunId)}>Cancelar retomada</button>
+                        : <button className="button button-danger" onClick={() => void cancelApprovedOrganizationPlan()}>Cancelar cópia</button>
+                      : organizationPlan.approvedAt && organizationPlan.validation?.fresh && planPreviewIsCurrent && !executionResult && !planBusy
+                        ? <button className="button button-primary" onClick={() => void executeApprovedOrganizationPlan()}>Executar cópia verificada</button>
+                        : null}
                   </div>
                 </section>
 
@@ -793,19 +925,19 @@ A origem será preservada. Continuar?`)) return
               <div className="path-field">
                 <label htmlFor="sourcePath"><span className="field-icon"><FolderOpen size={14} strokeWidth={1.8} aria-hidden="true" /></span> Pasta de origem <em>não será alterada</em></label>
                 <div className="path-control">
-                  <input id="sourcePath" value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setDestinationPath(''); setDestinationIsAutomatic(true); setResult(null); setBaseResult(null); setSelectedAnime(null); setEpisodeCorrections([]); setCorrectionError(''); setSelectedRow(null); setAniListResults([]); setAniListNotice(''); setAniListError('') }} placeholder="Selecione a pasta que contém os episódios…" spellCheck={false} />
-                  <button className="button button-secondary browse-button" onClick={() => void pickSource()}>Explorar</button>
+                  <input id="sourcePath" value={sourcePath} disabled={executionBusy} onChange={(event) => { invalidateAnalysisRequest(); setSourcePath(event.target.value); setDestinationPath(''); setDestinationIsAutomatic(true); setResult(null); setBaseResult(null); setSelectedAnime(null); setEpisodeCorrections([]); setCorrectionError(''); setSelectedRow(null); setAniListResults([]); setAniListNotice(''); setAniListError('') }} placeholder="Selecione a pasta que contém os episódios…" spellCheck={false} />
+                  <button className="button button-secondary browse-button" onClick={() => void pickSource()} disabled={executionBusy}>Explorar</button>
                 </div>
               </div>
               <div className="path-divider"><ArrowRight size={17} strokeWidth={1.7} aria-hidden="true" /></div>
               <div className="path-field">
                 <label htmlFor="destinationPath"><span className="field-icon output-icon"><Folder size={14} strokeWidth={1.8} aria-hidden="true" /></span> Destino sugerido <em>será criado no futuro</em></label>
                 <div className="path-control">
-                  <input id="destinationPath" value={destinationPath} onChange={(event) => { setDestinationPath(event.target.value); setDestinationIsAutomatic(false); setResult(null); setBaseResult(null) }} placeholder="A pasta de saída será sugerida aqui…" spellCheck={false} />
-                  <button className="button button-secondary browse-button" onClick={() => void pickDestination()}>Explorar</button>
+                  <input id="destinationPath" value={destinationPath} disabled={executionBusy} onChange={(event) => { invalidateAnalysisRequest(); setDestinationPath(event.target.value); setDestinationIsAutomatic(false); setResult(null); setBaseResult(null) }} placeholder="A pasta de saída será sugerida aqui…" spellCheck={false} />
+                  <button className="button button-secondary browse-button" onClick={() => void pickDestination()} disabled={executionBusy}>Explorar</button>
                 </div>
               </div>
-              <button className="button button-primary analyze-button" onClick={() => void analyze()} disabled={busy || !sourcePath.trim()}>
+              <button className="button button-primary analyze-button" onClick={() => void analyze()} disabled={busy || executionBusy || !sourcePath.trim()}>
                 <span className="button-icon">{busy ? <RefreshCw size={16} className="spin-icon" aria-hidden="true" /> : <Search size={16} aria-hidden="true" />}</span>{busy ? 'Analisando…' : 'Analisar arquivos'}
               </button>
             </section>
@@ -874,15 +1006,15 @@ A origem será preservada. Continuar?`)) return
                       <div className="side-card-title"><h3>Metadados do AniList</h3><span>CONSULTA MANUAL</span></div>
                       <p className="anilist-intro">Pesquise a série e escolha o registro correto. Não há associação automática por nome.</p>
                       <form className="anilist-search" onSubmit={(event) => { event.preventDefault(); void searchAniList() }}>
-                        <input aria-label="Pesquisar anime no AniList" value={aniListQuery} onChange={(event) => { setAniListQuery(event.target.value); setAniListError(''); setAniListNotice(''); setAniListResults([]) }} maxLength={120} placeholder="Nome romanizado do anime…" />
-                        <button className="button button-primary" type="submit" disabled={aniListBusy || !aniListQuery.trim()}>{aniListBusy ? 'Buscando…' : 'Buscar'}</button>
+                        <input aria-label="Pesquisar anime no AniList" value={aniListQuery} disabled={aniListBusy || executionBusy} onChange={(event) => { setAniListQuery(event.target.value); setAniListError(''); setAniListNotice(''); setAniListResults([]) }} maxLength={120} placeholder="Nome romanizado do anime…" />
+                        <button className="button button-primary" type="submit" disabled={aniListBusy || executionBusy || !aniListQuery.trim()}>{aniListBusy ? 'Buscando…' : 'Buscar'}</button>
                       </form>
                       {aniListError && <div className="anilist-message anilist-error" role="alert">{aniListError}</div>}
                       {aniListNotice && !aniListError && <div className="anilist-message" role="status">{aniListNotice}</div>}
                       {selectedAnime && (
                         <div className="anilist-selected">
                           <div><strong>Registro selecionado</strong><span>Associação salva localmente para esta pasta. Os nomes propostos usam o título escolhido; isso não valida cada episódio.</span></div>
-                          <button className="button button-secondary" type="button" disabled={aniListBusy} onClick={() => void clearAniListAnime()}>Remover</button>
+                          <button className="button button-secondary" type="button" disabled={aniListBusy || executionBusy} onClick={() => void clearAniListAnime()}>Remover</button>
                         </div>
                       )}
                       {aniListResults.length > 0 && (
@@ -898,7 +1030,7 @@ A origem será preservada. Continuar?`)) return
                                   {anime.title.english && anime.title.english !== title && <span className="anilist-alt-title">{anime.title.english}</span>}
                                   <span className="anilist-meta">{year ?? 'Ano ?'} · {anime.episodes == null ? 'Episódios ?' : `${anime.episodes} ep.`} · {formatAniListValue(anime.format)}</span>
                                   {anime.title.native && <span className="anilist-native">{anime.title.native}</span>}
-                                  <div className="anilist-result-actions"><a href={anime.siteUrl ?? `https://anilist.co/anime/${anime.id}`} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); void window.kageShelf.openAniListPage(anime.id) }}>Ver no AniList <ExternalLink size={12} aria-hidden="true" /></a><button className="button button-secondary" type="button" disabled={aniListBusy || !baseResult} onClick={() => void chooseAniListAnime(anime)}>{aniListBusy ? 'Salvando…' : 'Associar'}</button></div>
+                                  <div className="anilist-result-actions"><a href={anime.siteUrl ?? `https://anilist.co/anime/${anime.id}`} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); void window.kageShelf.openAniListPage(anime.id) }}>Ver no AniList <ExternalLink size={12} aria-hidden="true" /></a><button className="button button-secondary" type="button" disabled={aniListBusy || executionBusy || !baseResult} onClick={() => void chooseAniListAnime(anime)}>{aniListBusy ? 'Salvando…' : 'Associar'}</button></div>
                                 </div>
                               </article>
                             )
@@ -937,7 +1069,7 @@ A origem será preservada. Continuar?`)) return
                           </div>
                           <form className="correction-form" onSubmit={(event) => void saveManualCorrection(event)}>
                             <label htmlFor="contentKind">Tipo de conteúdo</label>
-                            <select id="contentKind" value={draftKind} onChange={(event) => {
+                            <select id="contentKind" value={draftKind} disabled={executionBusy} onChange={(event) => {
                               const nextKind = event.target.value as ContentKind
                               setDraftKind(nextKind)
                               if (nextKind === 'special') setDraftSeason('0')
@@ -949,20 +1081,20 @@ A origem será preservada. Continuar?`)) return
                             </select>
                             {draftKind === 'episode' && (
                               <div className="correction-input-grid">
-                                <div><label htmlFor="episodeSeason">Temporada</label><input id="episodeSeason" type="number" min="1" max="99" step="1" value={draftSeason} onChange={(event) => setDraftSeason(event.target.value)} required /></div>
-                                <div><label htmlFor="episodeNumber">Episódio</label><input id="episodeNumber" type="number" min="1" max="999" step="1" value={draftEpisode} onChange={(event) => setDraftEpisode(event.target.value)} required /></div>
+                                <div><label htmlFor="episodeSeason">Temporada</label><input id="episodeSeason" type="number" disabled={executionBusy} min="1" max="99" step="1" value={draftSeason} onChange={(event) => setDraftSeason(event.target.value)} required /></div>
+                                <div><label htmlFor="episodeNumber">Episódio</label><input id="episodeNumber" type="number" disabled={executionBusy} min="1" max="999" step="1" value={draftEpisode} onChange={(event) => setDraftEpisode(event.target.value)} required /></div>
                               </div>
                             )}
                             {draftKind === 'special' && (
                               <div className="correction-input-grid">
                                 <div><label>Temporada</label><div className="fixed-season">Season 00</div></div>
-                                <div><label htmlFor="specialNumber">Número do especial</label><input id="specialNumber" type="number" min="1" max="999" step="1" value={draftEpisode} onChange={(event) => setDraftEpisode(event.target.value)} required /></div>
+                                <div><label htmlFor="specialNumber">Número do especial</label><input id="specialNumber" type="number" disabled={executionBusy} min="1" max="999" step="1" value={draftEpisode} onChange={(event) => setDraftEpisode(event.target.value)} required /></div>
                               </div>
                             )}
                             {draftKind === 'movie' && <p className="correction-help">O filme será proposto na raiz da biblioteca, sem pasta Season.</p>}
                             {correctionError && <div className="anilist-message anilist-error" role="alert">{correctionError}</div>}
-                            <button className="button button-primary correction-save" type="submit" disabled={correctionBusy}>{correctionBusy ? 'Salvando…' : 'Salvar correção'}</button>
-                            {selectedRow.manuallyCorrected && <button className="button button-secondary correction-reset" type="button" disabled={correctionBusy} onClick={() => void removeManualCorrection()}>Restaurar identificação automática</button>}
+                            <button className="button button-primary correction-save" type="submit" disabled={correctionBusy || executionBusy}>{correctionBusy ? 'Salvando…' : 'Salvar correção'}</button>
+                            {selectedRow.manuallyCorrected && <button className="button button-secondary correction-reset" type="button" disabled={correctionBusy || executionBusy} onClick={() => void removeManualCorrection()}>Restaurar identificação automática</button>}
                           </form>
                           {selectedRow.outputRelativePath && <div className="detail-proposed"><small>CAMINHO PROPOSTO</small><code>{selectedRow.outputRelativePath}</code></div>}
                         </>
@@ -979,7 +1111,7 @@ A origem será preservada. Continuar?`)) return
               <div className="welcome-grid">
                 <div className="welcome-main"><EmptyState onPick={() => void pickSource()} /></div>
                 <aside className="welcome-side">
-                  <div className="side-card release-card"><div className="release-symbol"><ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" /></div><div className="eyebrow">KAGESHELF · VERSÃO ESTÁVEL 1.0.0</div><h3>Cópia verificada, origem preservada.</h3><p>Versão estável. Revise e aprove cada plano; conflitos são bloqueados e a origem permanece intacta.</p><div className="release-progress"><div><span>Interface</span><b>Refinada</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div><div><span>Lançamento</span><b>Estável</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div></div></div>
+                  <div className="side-card release-card"><div className="release-symbol"><ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" /></div><div className="eyebrow">KAGESHELF · VERSÃO 1.0.1</div><h3>Cópia verificada, origem preservada.</h3><p>Atualização de estabilidade. Revise e aprove cada plano; conflitos são bloqueados e a origem permanece intacta.</p><div className="release-progress"><div><span>Interface</span><b>Refinada</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div><div><span>Lançamento</span><b>Estável</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div></div></div>
                   <div className="side-card quick-card"><h3>O que funciona agora</h3><div className="quick-list"><div><span className="quick-icon">01</span><span>Selecionar pastas locais</span></div><div><span className="quick-icon">02</span><span>Encontrar vídeos e legendas</span></div><div><span className="quick-icon">03</span><span>Gerar prévia de episódios</span></div><div><span className="quick-icon">04</span><span>Cópia verificada com SHA-256</span></div></div></div>
                 </aside>
               </div>
@@ -988,9 +1120,9 @@ A origem será preservada. Continuar?`)) return
             <footer className="bottom-bar">
               <div className="bottom-hint"><span className="hint-dot" /> <span>Seus arquivos permanecem no computador.</span></div>
               <div className="bottom-actions">
-                {result && <button className="button button-secondary" onClick={() => void analyze()} disabled={busy}>{busy ? <><RefreshCw size={14} className="spin-icon" aria-hidden="true" /> Analisando…</> : <><RefreshCw size={14} aria-hidden="true" /> Reanalisar</>}</button>}
+                {result && <button className="button button-secondary" onClick={() => void analyze()} disabled={busy || executionBusy}>{busy ? <><RefreshCw size={14} className="spin-icon" aria-hidden="true" /> Analisando…</> : <><RefreshCw size={14} aria-hidden="true" /> Reanalisar</>}</button>}
                 <button className="button button-secondary" onClick={() => setActiveNav('Plano')} disabled={!result}>Ver plano</button>
-                <button className="button button-primary" onClick={() => void generateOrganizationPlan()} disabled={!result || planBusy}><ClipboardList size={15} aria-hidden="true" /> {planBusy ? 'Gerando plano…' : 'Gerar plano'} <span className="button-next"><ArrowRight size={15} strokeWidth={1.8} aria-hidden="true" /></span></button>
+                <button className="button button-primary" onClick={() => void generateOrganizationPlan()} disabled={!result || planBusy || executionBusy}><ClipboardList size={15} aria-hidden="true" /> {planBusy ? 'Gerando plano…' : 'Gerar plano'} <span className="button-next"><ArrowRight size={15} strokeWidth={1.8} aria-hidden="true" /></span></button>
               </div>
             </footer>
           </section>

@@ -4,7 +4,7 @@
 
 **A local-first desktop organizer for anime libraries prepared for Jellyfin.**
 
-> **Release status:** `1.0.0` — stable release. Downloadable packages are published through GitHub Releases.
+> **Release status:** `1.0.1` — patch release in preparation. The latest stable release is `1.0.0`; published packages are available through GitHub Releases.
 
 KageShelf helps you turn a folder of downloaded episodes into a reviewable, Jellyfin-friendly library structure. It is built with Electron, React, and TypeScript for Windows and Linux. Media files stay on your computer: the app scans locally and only contacts AniList when you search for anime metadata.
 
@@ -27,6 +27,15 @@ Download the latest release from the [GitHub Releases page](https://github.com/G
 - **Linux AppImage:** single-file application package.
 
 Windows binaries are not code-signed, so Windows SmartScreen or antivirus software may show a warning. On Linux systems without FUSE 2, an AppImage may need to be launched with `--appimage-extract-and-run`.
+
+## 1.0.1 patch notes (in preparation)
+
+- Improve recovery and rollback when an interruption occurs between file publication and journal commit.
+- Prevent execution of organization plans after their reviewed inputs become stale.
+- Ignore outdated asynchronous analysis and metadata responses.
+- Schedule concurrent AniList requests to respect the minimum start interval.
+- Strengthen IPC frame validation and reduce GitHub Actions permissions to the minimum required.
+- Prevent conflicting interface operations while an organization execution is active.
 
 ## Development
 
@@ -73,7 +82,7 @@ Artifacts are written to `release/` and are intentionally excluded from Git. Win
 
 KageShelf starts with a read-only preview. Review the proposed organization plan and approve it explicitly before copying. Existing destination files are treated as conflicts; they are not silently overwritten. Keep a backup of important libraries and test with disposable folders before processing a large collection. Rollback is conservative and removes only files whose ownership and integrity can be verified.
 
-The app keeps the legacy local application-data directory during the rename from Jellyfin Anime Supremo so existing associations, episode corrections, and execution history remain available. The installer retains the legacy application ID to support an in-place upgrade from the release candidate. The stable `1.0.0` release should only be tagged after the RC passes CI and real-platform smoke tests.
+The app keeps the legacy local application-data directory during the rename from Jellyfin Anime Supremo so existing associations, episode corrections, and execution history remain available. The installer retains the legacy application ID to support an in-place upgrade from the release candidate. The stable `1.0.0` release was published after CI and real-platform validation. The `1.0.1` patch focuses on recovery, rollback, and application-state reliability; it should only be published after its cross-platform CI validation is complete.
 
 ## License
 

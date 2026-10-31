@@ -44,7 +44,13 @@ function assertTrustedRenderer(event: Electron.IpcMainInvokeEvent): void {
     throw new Error('Solicitação rejeitada: origem IPC não autorizada.')
   }
 
-  const actualUrl = event.senderFrame?.url
+  const senderFrame = event.senderFrame
+  const mainFrame = mainWindow.webContents.mainFrame
+  if (!senderFrame || senderFrame.processId !== mainFrame.processId || senderFrame.routingId !== mainFrame.routingId) {
+    throw new Error('Solicitação rejeitada: somente o frame principal pode chamar a API IPC.')
+  }
+
+  const actualUrl = senderFrame.url
   const expectedUrl = mainWindow.webContents.getURL()
   if (!actualUrl || !expectedUrl) throw new Error('Não foi possível validar a origem da solicitação.')
 
@@ -64,7 +70,7 @@ function createWindow(): void {
     height: 980,
     minWidth: 1120,
     minHeight: 720,
-    title: 'KageShelf 1.0.0',
+    title: 'KageShelf 1.0.1',
     backgroundColor: '#0b0e14',
     show: false,
     webPreferences: {
