@@ -52,7 +52,7 @@ function EmptyState({ onPick }: { onPick: () => void }) {
     <div className="empty-state">
       <div className="empty-illustration"><FolderOpen size={31} strokeWidth={1.7} aria-hidden="true" /><i><Plus size={14} strokeWidth={2} aria-hidden="true" /></i></div>
       <h2>Vamos organizar seus animes?</h2>
-      <p>Escolha a pasta da série. A versão 1.0.0 reúne identificação, metadados, plano e cópia verificada; a origem permanece intacta.</p>
+      <p>Escolha a pasta da série. A versão 1.0.1 reúne identificação, metadados, plano e cópia verificada; a origem permanece intacta.</p>
       <button className="button button-primary" onClick={onPick}>Escolher pasta de origem</button>
     </div>
   )
@@ -750,7 +750,7 @@ A origem será preservada. Continuar?`)) return
           <div className="brand-mark"><Layers size={23} strokeWidth={1.7} aria-hidden="true" /></div>
           <div className="brand-copy">
             <div className="brand-title">Kage<span>Shelf</span></div>
-            <div className="brand-version">VERSÃO <b>v1.0.0</b></div>
+            <div className="brand-version">VERSÃO <b>v1.0.1</b></div>
           </div>
         </div>
 
@@ -775,7 +775,7 @@ A origem será preservada. Continuar?`)) return
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className="online-dot" /> Versão estável 1.0.0
+          <span className="online-dot" /> Versão 1.0.1
         </div>
       </aside>
 
@@ -793,14 +793,14 @@ A origem será preservada. Continuar?`)) return
             <div className="page-heading"><div><div className="eyebrow">PREFERÊNCIAS</div><h1>Configurações</h1><p>Preferências locais do aplicativo.</p></div></div>
             <div className="settings-card">
               <h3>Versão e comportamento</h3>
-              <div className="setting-row"><div><strong>Versão do aplicativo</strong><p>KageShelf 1.0.0</p></div><span className="setting-value">Estável</span></div>
+              <div className="setting-row"><div><strong>Versão do aplicativo</strong><p>KageShelf 1.0.1</p></div><span className="setting-value">Estável</span></div>
               <div className="setting-row"><div><strong>Operações de arquivos</strong><p>Cópias aprovadas são verificadas por SHA-256; a origem é preservada.</p></div><span className="setting-value setting-safe">Cópia verificada</span></div>
               <div className="setting-row"><div><strong>Seguimento de links simbólicos</strong><p>Pastas e arquivos simbólicos são ignorados durante a varredura.</p></div><span className="setting-value">Desativado</span></div>
             </div>
           </section>
         ) : activeNav === 'Relatórios' ? (
           <section className="page-content">
-            <div className="page-heading"><div><div className="eyebrow">HISTÓRICO LOCAL · 1.0.0</div><h1>Execuções</h1><p>Operações salvas localmente. Execuções interrompidas podem ser retomadas após revalidar origem e destino.</p></div><button className="button button-secondary" onClick={() => void refreshExecutionHistory()} disabled={historyBusy}>{historyBusy ? 'Atualizando…' : 'Atualizar histórico'}</button></div>
+            <div className="page-heading"><div><div className="eyebrow">HISTÓRICO LOCAL · 1.0.1</div><h1>Execuções</h1><p>Operações salvas localmente. Execuções interrompidas podem ser retomadas após revalidar origem e destino.</p></div><button className="button button-secondary" onClick={() => void refreshExecutionHistory()} disabled={historyBusy}>{historyBusy ? 'Atualizando…' : 'Atualizar histórico'}</button></div>
             {historyError && <div className="alert alert-error"><span><AlertTriangle size={14} strokeWidth={1.9} aria-hidden="true" /></span><p>{historyError}</p><button onClick={() => setHistoryError('')} aria-label="Fechar aviso"><X size={14} strokeWidth={1.9} aria-hidden="true" /></button></div>}
             {executionError && <div className="alert alert-error"><span><AlertTriangle size={14} strokeWidth={1.9} aria-hidden="true" /></span><p>{executionError}</p><button onClick={() => setExecutionError('')} aria-label="Fechar aviso"><X size={14} strokeWidth={1.9} aria-hidden="true" /></button></div>}
             {executionBusy && historyActionRunId && <section className="execution-card"><strong>Retomando execução {historyActionRunId.slice(0, 8)}</strong><p>{executionProgress?.message ?? 'Revalidando os arquivos…'}</p>{executionProgress && <><div className="execution-progress-track"><span style={{ width: `${executionProgress.totalBytes > 0 ? Math.min(100, (executionProgress.bytesCopied / executionProgress.totalBytes) * 100) : 0}%` }} /></div><small>{executionProgress.completedFiles}/{executionProgress.totalFiles} arquivo(s) · {formatBytes(executionProgress.bytesCopied)} / {formatBytes(executionProgress.totalBytes)}</small><button className="button button-danger" onClick={() => void window.kageShelf.cancelOrganizationExecution(historyActionRunId)}>Cancelar retomada</button></>}</section>}
@@ -810,7 +810,7 @@ A origem será preservada. Continuar?`)) return
           <section className="page-content plan-page">
             <div className="page-heading">
               <div>
-                <div className="eyebrow">1.0.0 · CÓPIA VERIFICADA</div>
+                <div className="eyebrow">1.0.1 · CÓPIA VERIFICADA</div>
                 <h1>Plano de organização</h1>
                 <p>Revalide, aprove e confirme antes de copiar. Cada arquivo é verificado por SHA-256.</p>
               </div>
@@ -1111,7 +1111,7 @@ A origem será preservada. Continuar?`)) return
               <div className="welcome-grid">
                 <div className="welcome-main"><EmptyState onPick={() => void pickSource()} /></div>
                 <aside className="welcome-side">
-                  <div className="side-card release-card"><div className="release-symbol"><ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" /></div><div className="eyebrow">KAGESHELF · VERSÃO ESTÁVEL 1.0.0</div><h3>Cópia verificada, origem preservada.</h3><p>Versão estável. Revise e aprove cada plano; conflitos são bloqueados e a origem permanece intacta.</p><div className="release-progress"><div><span>Interface</span><b>Refinada</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div><div><span>Lançamento</span><b>Estável</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div></div></div>
+                  <div className="side-card release-card"><div className="release-symbol"><ShieldCheck size={17} strokeWidth={1.8} aria-hidden="true" /></div><div className="eyebrow">KAGESHELF · VERSÃO 1.0.1</div><h3>Cópia verificada, origem preservada.</h3><p>Atualização de estabilidade. Revise e aprove cada plano; conflitos são bloqueados e a origem permanece intacta.</p><div className="release-progress"><div><span>Interface</span><b>Refinada</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div><div><span>Lançamento</span><b>Estável</b></div><div className="progress-track"><span style={{ width: '100%' }} /></div></div></div>
                   <div className="side-card quick-card"><h3>O que funciona agora</h3><div className="quick-list"><div><span className="quick-icon">01</span><span>Selecionar pastas locais</span></div><div><span className="quick-icon">02</span><span>Encontrar vídeos e legendas</span></div><div><span className="quick-icon">03</span><span>Gerar prévia de episódios</span></div><div><span className="quick-icon">04</span><span>Cópia verificada com SHA-256</span></div></div></div>
                 </aside>
               </div>

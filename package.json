@@ -1,6 +1,6 @@
 {
   "name": "kageshelf",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Cross-platform desktop organizer for local anime libraries prepared for Jellyfin.",
   "main": "./out/main/index.js",
